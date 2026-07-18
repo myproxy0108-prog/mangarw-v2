@@ -3,21 +3,22 @@ const fetch = require('node-fetch');
 const https = require('https');
 const path = require('path');
 const fs = require('fs');
-const sharp = require('sharp'); // 🌟 画像圧縮ライブラリを追加
-
 const app = express();
 
 // ==========================================
 // 1. Webプロキシ (Ultraviolet等) の処理
 // ==========================================
 const PROXY_DIR = path.join(__dirname, 'proxy'); 
-const PROXY_ENDPOINTS = ['prxy', 'baremux', 'epoxy', 'libcurl', 'register-sw.mjs', 'uv'];
+const PROXY_ENDPOINTS = [
+  'prxy', 'baremux', 'epoxy', 'libcurl', 'register-sw.mjs', 'uv'
+];
 
 app.get('/proxy', (req, res) => res.redirect('/proxy/'));
 app.use('/proxy', express.static(PROXY_DIR));
 
 app.use((req, res, next) => {
     if (res.headersSent) return next();
+    
     const fileName = req.path.replace(/^\//, '');
     if (PROXY_ENDPOINTS.includes(fileName)) {
         const targetPath = path.join(PROXY_DIR, fileName);
@@ -28,9 +29,13 @@ app.use((req, res, next) => {
     next();
 });
 
+// ==========================================
+// 2. 漫画プロキシからの保護（干渉防止壁）
+// ==========================================
 const UV_DYNAMIC_PATHS = [
     '/proxy', '/prxy', '/baremux', '/epoxy', '/libcurl', 
-    '/register-sw.mjs', '/uv', '/~uv', '/bare', '/_img_/'
+    '/register-sw.mjs', '/uv', '/~uv', '/bare', 
+    '/_img_/' // ← 画像プロキシも保護
 ];
 
 app.use((req, res, next) => {
@@ -42,7 +47,7 @@ app.use((req, res, next) => {
 });
 
 // ==========================================
-// 2. 【核心】超圧縮・画像プロキシ（帯域幅節約）
+// 3. 【新設】外部CDNを使った超圧縮・画像プロキシ
 // ==========================================
 const proxyAgent = new https.Agent({ keepAlive: true, maxSockets: 512, timeout: 60000 });
 
@@ -50,39 +55,41 @@ app.get('/_img_/', async (req, res) => {
     const imgUrl = req.query.url;
     if (!imgUrl) return res.status(400).end();
 
+    // 🌟 wsrv.nl を使って横幅720px、WebP、画質40%に超圧縮（通信量を1/10に！）
+    const cdnUrl = `https://wsrv.nl/?url=${encodeURIComponent(imgUrl)}&w=720&output=webp&q=40`;
+
     try {
-        const imgRes = await fetch(imgUrl, {
-            headers: {
-                'Referer': 'https://mangarw.com/',
-                'User-Agent': req.get('user-agent') || 'Mozilla/5.0'
-            },
+        const imgRes = await fetch(cdnUrl, {
+            headers: { 'User-Agent': req.get('user-agent') || 'Mozilla/5.0' },
             agent: proxyAgent
         });
 
         res.set('Access-Control-Allow-Origin', '*');
         res.set('Cache-Control', 'public, max-age=31536000, immutable');
-        // 出力はすべて超軽量な webp 形式に統一する
+
+        // 万が一 wsrv.nl が画像を弾いた場合（リファラ制限など）のフェイルセーフ（保険）
+        if (!imgRes.ok) {
+            console.log(`[CDN Miss] Fallback to direct fetch: ${imgUrl}`);
+            const fallbackRes = await fetch(imgUrl, {
+                headers: { 'Referer': 'https://mangarw.com/', 'User-Agent': 'Mozilla/5.0' },
+                agent: proxyAgent
+            });
+            res.set('Content-Type', fallbackRes.headers.get('content-type'));
+            return fallbackRes.body.pipe(res);
+        }
+
         res.set('Content-Type', 'image/webp'); 
-        
-        // 🌟 ここで画像をリアルタイム圧縮！
-        const compressor = sharp()
-            .resize({ width: 720, withoutEnlargement: true }) // スマホ向けに横幅を絞る（無駄なサイズをカット）
-            .webp({ quality: 40 }); // 画質を40%に下げる（読めるレベルを維持しつつ容量激減）
-
-        // 取得した画像をそのままブラウザに流すのではなく、圧縮機(compressor)を通す
-        imgRes.body.pipe(compressor).pipe(res);
-
-        compressor.on('error', () => {
-            if (!res.headersSent) res.status(502).end();
+        imgRes.body.pipe(res);
+        imgRes.body.on('error', () => {
+            if (!res.headersSent) res.end();
         });
-
     } catch (e) {
         if (!res.headersSent) res.status(502).end();
     }
 });
 
 // ==========================================
-// 3. 漫画プロキシ (MangaRaw 本体処理)
+// 4. 漫画プロキシ (MangaRaw 本体処理)
 // ==========================================
 const TARGET_HOST = "mangarw.com";
 const TARGET_BASE = `https://${TARGET_HOST}`;
@@ -100,7 +107,7 @@ const INJECT_CODE = `
   (function() {
     window.open = () => null;
 
-    // 画像のURLを「超圧縮プロキシ (/_img_/)」に向ける
+    // 画像のURLを「超圧縮プロキシ」経由に書き換える
     const processImages = () => {
       document.querySelectorAll('img').forEach(img => {
         const src = img.dataset.src || img.getAttribute('src');
@@ -239,4 +246,4 @@ app.all('*', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Super Compressed Engine Online on port ${PORT}`));
+app.listen(PORT, () => console.log(`Super Compressed Manga Engine Online on port ${PORT}`));
