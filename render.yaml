@@ -1,7 +1,7 @@
 version: 1
 services:
   - type: web
-    name: mangarw
+    name: mangarw-v2
     env: node
     plan: free
     buildCommand: npm install
