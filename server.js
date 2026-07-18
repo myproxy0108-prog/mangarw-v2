@@ -8,6 +8,7 @@ const app = express();
 // ==========================================
 // 1. Webプロキシ (Ultraviolet等) の処理
 // ==========================================
+// ※ 実際のフォルダ名に合わせてください
 const PROXY_DIR = path.join(__dirname, 'proxy'); 
 const PROXY_ENDPOINTS = [
   'prxy', 'baremux', 'epoxy', 'libcurl', 'register-sw.mjs', 'uv'
@@ -17,34 +18,19 @@ app.use('/proxy', express.static(PROXY_DIR));
 
 app.use((req, res, next) => {
     if (res.headersSent) return next();
-    const targetPath = path.join(PROXY_DIR, req.path);
-    const normalizedPath = path.normalize(targetPath);
-    if (!normalizedPath.startsWith(PROXY_DIR)) return next();
-    if (fs.existsSync(targetPath) && fs.lstatSync(targetPath).isFile()) {
-        return res.sendFile(targetPath);
+    
+    const fileName = req.path.replace(/^\//, '');
+    if (PROXY_ENDPOINTS.includes(fileName)) {
+        const targetPath = path.join(PROXY_DIR, fileName);
+        if (fs.existsSync(targetPath) && fs.lstatSync(targetPath).isFile()) {
+            return res.sendFile(targetPath);
+        }
     }
     next();
 });
 
 // ==========================================
-// 2. 漫画プロキシからの保護（干渉防止壁）
-// ==========================================
-const UV_DYNAMIC_PATHS = [
-    '/proxy', '/prxy', '/baremux', '/epoxy', '/libcurl', 
-    '/register-sw.mjs', '/uv', '/~uv', '/bare',
-    '/_img_/' // ← 追加：画像プロキシパスを干渉から守る
-];
-
-app.use((req, res, next) => {
-    if (UV_DYNAMIC_PATHS.some(p => req.path.startsWith(p))) {
-        if (req.path.startsWith('/_img_/')) return next(); // 画像プロキシには通す
-        return res.status(404).end();
-    }
-    next();
-});
-
-// ==========================================
-// 3. 【新機能】画像専用プロキシ (embed.html不要化)
+// 2. 画像専用プロキシ (embed.html不要化)
 // ==========================================
 const proxyAgent = new https.Agent({ keepAlive: true, maxSockets: 512, timeout: 60000 });
 
@@ -72,7 +58,7 @@ app.get('/_img_/', async (req, res) => {
 });
 
 // ==========================================
-// 4. 漫画プロキシ (MangaRaw 本体処理)
+// 3. 漫画プロキシ (MangaRaw 本体)
 // ==========================================
 const TARGET_HOST = "mangarw.com";
 const TARGET_BASE = `https://${TARGET_HOST}`;
@@ -90,17 +76,16 @@ const INJECT_CODE = `
   (function() {
     window.open = () => null;
 
-    // 【修正】画像のURLを「server.jsの専用プロキシ」経由に書き換える
+    // 画像のURLを「server.jsの専用プロキシ」経由に書き換える
     const processImages = () => {
       document.querySelectorAll('img').forEach(img => {
         const src = img.dataset.src || img.getAttribute('src');
         if (src && !src.startsWith('data:') && !src.includes('/_img_/?url=')) {
           const absUrl = src.startsWith('http') ? src : window.location.origin + (src.startsWith('/') ? src : '/' + src);
           const proxyUrl = '/_img_/?url=' + encodeURIComponent(absUrl);
-          
           img.setAttribute('src', proxyUrl);
           img.setAttribute('data-src', proxyUrl);
-          img.removeAttribute('loading'); // エラーの元になる遅延読み込みを解除
+          img.removeAttribute('loading'); 
         }
       });
     };
@@ -143,7 +128,20 @@ const INJECT_CODE = `
 </script>
 `;
 
-app.all('*', async (req, res) => {
+app.all('*', async (req, res, next) => {
+    // ========================================================
+    // 【最重要】Webプロキシ保護ガード
+    // WebプロキシやUltravioletの通信は、漫画プロキシをスキップさせる
+    // ========================================================
+    const EXCLUDE_PATHS = [
+        '/proxy', '/prxy', '/baremux', '/epoxy', '/libcurl', 
+        '/register-sw.mjs', '/uv', '/~uv', '/bare'
+    ];
+    // パスがWebプロキシのもの、またはエンドポイント名ならスキップ
+    if (EXCLUDE_PATHS.some(p => req.path.startsWith(p)) || PROXY_ENDPOINTS.includes(req.path.replace(/^\//, ''))) {
+        return next(); 
+    }
+
     if (req.url === '/favicon.ico') return res.status(204).end();
 
     const targetUrl = TARGET_BASE + req.url;
@@ -227,6 +225,8 @@ app.all('*', async (req, res) => {
         if (!res.headersSent) res.status(502).send("Manga Engine Error: " + error.message);
     }
 });
+
+// ※Ultraviolet を使う場合、Bareサーバーのマウントなどがあればここに記述します
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Ultimate Engine Online on port ${PORT}`));
