@@ -4,7 +4,7 @@ services:
     name: mangarw-v2
     env: node
     plan: free
-    buildCommand: npm install && npm install --os=linux --cpu=x64 sharp
+    buildCommand: npm install
     startCommand: npm start
     autoDeploy: true
     envVars:
