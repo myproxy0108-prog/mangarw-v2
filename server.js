@@ -3,23 +3,21 @@ const fetch = require('node-fetch');
 const https = require('https');
 const path = require('path');
 const fs = require('fs');
+const sharp = require('sharp'); // 🌟 画像圧縮ライブラリを追加
+
 const app = express();
 
 // ==========================================
 // 1. Webプロキシ (Ultraviolet等) の処理
 // ==========================================
 const PROXY_DIR = path.join(__dirname, 'proxy'); 
-const PROXY_ENDPOINTS = [
-  'prxy', 'baremux', 'epoxy', 'libcurl', 'register-sw.mjs', 'uv'
-];
+const PROXY_ENDPOINTS = ['prxy', 'baremux', 'epoxy', 'libcurl', 'register-sw.mjs', 'uv'];
 
-// 【修正】/proxy にアクセスした際、自動で /proxy/ にリダイレクトさせて Cannot GET を防ぐ
 app.get('/proxy', (req, res) => res.redirect('/proxy/'));
 app.use('/proxy', express.static(PROXY_DIR));
 
 app.use((req, res, next) => {
     if (res.headersSent) return next();
-    
     const fileName = req.path.replace(/^\//, '');
     if (PROXY_ENDPOINTS.includes(fileName)) {
         const targetPath = path.join(PROXY_DIR, fileName);
@@ -30,8 +28,21 @@ app.use((req, res, next) => {
     next();
 });
 
+const UV_DYNAMIC_PATHS = [
+    '/proxy', '/prxy', '/baremux', '/epoxy', '/libcurl', 
+    '/register-sw.mjs', '/uv', '/~uv', '/bare', '/_img_/'
+];
+
+app.use((req, res, next) => {
+    if (UV_DYNAMIC_PATHS.some(p => req.path.startsWith(p))) {
+        if (req.path.startsWith('/_img_/')) return next(); 
+        return res.status(404).end();
+    }
+    next();
+});
+
 // ==========================================
-// 2. 【復旧】画像専用プロキシ (embed.html不要)
+// 2. 【核心】超圧縮・画像プロキシ（帯域幅節約）
 // ==========================================
 const proxyAgent = new https.Agent({ keepAlive: true, maxSockets: 512, timeout: 60000 });
 
@@ -47,29 +58,31 @@ app.get('/_img_/', async (req, res) => {
             },
             agent: proxyAgent
         });
+
         res.set('Access-Control-Allow-Origin', '*');
         res.set('Cache-Control', 'public, max-age=31536000, immutable');
-        res.set('Content-Type', imgRes.headers.get('content-type'));
+        // 出力はすべて超軽量な webp 形式に統一する
+        res.set('Content-Type', 'image/webp'); 
         
-        // 画像バイナリをそのままブラウザに流す
-        imgRes.body.pipe(res);
-        imgRes.body.on('error', () => res.end());
+        // 🌟 ここで画像をリアルタイム圧縮！
+        const compressor = sharp()
+            .resize({ width: 720, withoutEnlargement: true }) // スマホ向けに横幅を絞る（無駄なサイズをカット）
+            .webp({ quality: 40 }); // 画質を40%に下げる（読めるレベルを維持しつつ容量激減）
+
+        // 取得した画像をそのままブラウザに流すのではなく、圧縮機(compressor)を通す
+        imgRes.body.pipe(compressor).pipe(res);
+
+        compressor.on('error', () => {
+            if (!res.headersSent) res.status(502).end();
+        });
+
     } catch (e) {
-        res.status(502).end();
+        if (!res.headersSent) res.status(502).end();
     }
 });
 
 // ==========================================
-// 3. 漫画プロキシからの保護（干渉防止壁）
-// ==========================================
-const EXCLUDE_PATHS = [
-    '/proxy', '/prxy', '/baremux', '/epoxy', '/libcurl', 
-    '/register-sw.mjs', '/uv', '/~uv', '/bare', 
-    '/_img_/' // ← 画像プロキシも保護
-];
-
-// ==========================================
-// 4. 漫画プロキシ (MangaRaw 本体)
+// 3. 漫画プロキシ (MangaRaw 本体処理)
 // ==========================================
 const TARGET_HOST = "mangarw.com";
 const TARGET_BASE = `https://${TARGET_HOST}`;
@@ -87,13 +100,14 @@ const INJECT_CODE = `
   (function() {
     window.open = () => null;
 
-    // 【修正】画像のURLを「/_img_/?url=」経由に書き換える (サーバー側プロキシ)
+    // 画像のURLを「超圧縮プロキシ (/_img_/)」に向ける
     const processImages = () => {
       document.querySelectorAll('img').forEach(img => {
         const src = img.dataset.src || img.getAttribute('src');
         if (src && !src.startsWith('data:') && !src.includes('/_img_/?url=')) {
           const absUrl = src.startsWith('http') ? src : window.location.origin + (src.startsWith('/') ? src : '/' + src);
           const proxyUrl = '/_img_/?url=' + encodeURIComponent(absUrl);
+          
           img.setAttribute('src', proxyUrl);
           img.setAttribute('data-src', proxyUrl);
           img.removeAttribute('loading'); 
@@ -139,13 +153,7 @@ const INJECT_CODE = `
 </script>
 `;
 
-app.all('*', async (req, res, next) => {
-    // --- 【最重要ガード】 ---
-    // ここでWebプロキシの通信を漫画プロキシに巻き込まれないようにスキップする
-    if (EXCLUDE_PATHS.some(p => req.path.startsWith(p)) || PROXY_ENDPOINTS.includes(req.path.replace(/^\//, ''))) {
-        return next(); 
-    }
-
+app.all('*', async (req, res) => {
     if (req.url === '/favicon.ico') return res.status(204).end();
 
     const targetUrl = TARGET_BASE + req.url;
@@ -226,9 +234,9 @@ app.all('*', async (req, res, next) => {
         response.body.pipe(res);
 
     } catch (error) {
-        if (!res.headersSent) res.status(502).send("Manga Engine Error");
+        if (!res.headersSent) res.status(502).send("Server Error");
     }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Proxy Engine Online on port ${PORT}`));
+app.listen(PORT, () => console.log(`Super Compressed Engine Online on port ${PORT}`));
