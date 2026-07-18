@@ -6,73 +6,77 @@ const fs = require('fs');
 const app = express();
 
 // ==========================================
-// 1. Webプロキシ (Ultraviolet等) のファイル配信
+// 1. Webプロキシ (Ultraviolet等) の処理
 // ==========================================
-const PROXY_DIR = path.join(__dirname, 'proxy'); // ※実際のフォルダ名に合わせてください
+const PROXY_DIR = path.join(__dirname, 'proxy'); 
 const PROXY_ENDPOINTS = [
-  'prxy',
-  'baremux',
-  'epoxy',
-  'libcurl',
-  'register-sw.mjs',
-  'uv'
+  'prxy', 'baremux', 'epoxy', 'libcurl', 'register-sw.mjs', 'uv'
 ];
 
 app.use('/proxy', express.static(PROXY_DIR));
 
 app.use((req, res, next) => {
     if (res.headersSent) return next();
-
     const targetPath = path.join(PROXY_DIR, req.path);
     const normalizedPath = path.normalize(targetPath);
-
-    if (!normalizedPath.startsWith(PROXY_DIR)) {
-        return next();
-    }
-
+    if (!normalizedPath.startsWith(PROXY_DIR)) return next();
     if (fs.existsSync(targetPath) && fs.lstatSync(targetPath).isFile()) {
         return res.sendFile(targetPath);
     }
-
     next();
 });
 
 // ==========================================
-// 2. 【最重要】漫画プロキシからの保護（干渉防止壁）
+// 2. 漫画プロキシからの保護（干渉防止壁）
 // ==========================================
-// WebプロキシやBareサーバーが使う「動的パス」を漫画処理から守る
 const UV_DYNAMIC_PATHS = [
-    '/proxy', 
-    '/prxy', 
-    '/baremux', 
-    '/epoxy', 
-    '/libcurl', 
-    '/register-sw.mjs', 
-    '/uv', 
-    '/~uv',     // Ultravioletの動的通信
-    '/bare',    // Bareサーバー通信
-    '/embed.html' // 漫画画像表示用
+    '/proxy', '/prxy', '/baremux', '/epoxy', '/libcurl', 
+    '/register-sw.mjs', '/uv', '/~uv', '/bare',
+    '/_img_/' // ← 追加：画像プロキシパスを干渉から守る
 ];
 
 app.use((req, res, next) => {
-    // アクセスされたパスがWebプロキシ用のものなら、絶対に漫画の処理には進ませない
     if (UV_DYNAMIC_PATHS.some(p => req.path.startsWith(p))) {
-        // もし上の静的ファイル配信でも処理されなかった場合は 404 にして止める
+        if (req.path.startsWith('/_img_/')) return next(); // 画像プロキシには通す
         return res.status(404).end();
     }
-    // Webプロキシ用でなければ、漫画プロキシへ進む
     next();
 });
 
+// ==========================================
+// 3. 【新機能】画像専用プロキシ (embed.html不要化)
+// ==========================================
+const proxyAgent = new https.Agent({ keepAlive: true, maxSockets: 512, timeout: 60000 });
+
+app.get('/_img_/', async (req, res) => {
+    const imgUrl = req.query.url;
+    if (!imgUrl) return res.status(400).end();
+
+    try {
+        const imgRes = await fetch(imgUrl, {
+            headers: {
+                'Referer': 'https://mangarw.com/',
+                'User-Agent': req.get('user-agent') || 'Mozilla/5.0'
+            },
+            agent: proxyAgent
+        });
+        res.set('Access-Control-Allow-Origin', '*');
+        res.set('Cache-Control', 'public, max-age=31536000, immutable');
+        res.set('Content-Type', imgRes.headers.get('content-type'));
+        
+        imgRes.body.pipe(res);
+        imgRes.body.on('error', () => res.end());
+    } catch (e) {
+        res.status(502).end();
+    }
+});
 
 // ==========================================
-// 3. 漫画プロキシ (MangaRaw スタンドアローン版)
+// 4. 漫画プロキシ (MangaRaw 本体処理)
 // ==========================================
 const TARGET_HOST = "mangarw.com";
 const TARGET_BASE = `https://${TARGET_HOST}`;
-const proxyAgent = new https.Agent({ keepAlive: true, maxSockets: 512, timeout: 60000 });
 
-// 漫画データ用にリミット拡大
 app.use(express.raw({ type: '*/*', limit: '50mb' }));
 
 const INJECT_CODE = `
@@ -85,24 +89,30 @@ const INJECT_CODE = `
 <script>
   (function() {
     window.open = () => null;
+
+    // 【修正】画像のURLを「server.jsの専用プロキシ」経由に書き換える
     const processImages = () => {
       document.querySelectorAll('img').forEach(img => {
         const src = img.dataset.src || img.getAttribute('src');
-        if (src && !src.startsWith('data:') && !src.includes('/embed.html#')) {
+        if (src && !src.startsWith('data:') && !src.includes('/_img_/?url=')) {
           const absUrl = src.startsWith('http') ? src : window.location.origin + (src.startsWith('/') ? src : '/' + src);
-          const proxyUrl = '/embed.html#' + absUrl;
+          const proxyUrl = '/_img_/?url=' + encodeURIComponent(absUrl);
+          
           img.setAttribute('src', proxyUrl);
           img.setAttribute('data-src', proxyUrl);
-          img.removeAttribute('loading'); 
+          img.removeAttribute('loading'); // エラーの元になる遅延読み込みを解除
         }
       });
     };
-    setInterval(() => {
-      document.querySelectorAll('div, a').forEach(el => {
+
+    const nukeOverlays = () => {
+      document.querySelectorAll('div, a, section, ins').forEach(el => {
         const s = window.getComputedStyle(el);
         if (parseInt(s.zIndex) > 1000 && parseFloat(s.opacity) < 0.1 && !el.innerText.trim()) el.remove();
       });
-    }, 1000);
+    };
+    setInterval(nukeOverlays, 1000);
+
     const initAll = () => {
       processImages();
       const obs = new IntersectionObserver((entries) => {
@@ -122,6 +132,7 @@ const INJECT_CODE = `
       new MutationObserver(processImages).observe(document.body, { childList: true, subtree: true });
     };
     document.readyState === 'loading' ? document.addEventListener('DOMContentLoaded', initAll) : initAll();
+    
     window.addEventListener('click', function(e) {
       const target = e.target.closest('a');
       if (target && target.href && (target.href.includes('adex') || target.href.includes('university'))) {
@@ -218,4 +229,4 @@ app.all('*', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Ultimate Proxy Engine Online on port ${PORT}`));
+app.listen(PORT, () => console.log(`Ultimate Engine Online on port ${PORT}`));
