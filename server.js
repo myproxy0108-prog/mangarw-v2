@@ -8,12 +8,13 @@ const app = express();
 // ==========================================
 // 1. Webプロキシ (Ultraviolet等) の処理
 // ==========================================
-// ※ 実際のフォルダ名に合わせてください
 const PROXY_DIR = path.join(__dirname, 'proxy'); 
 const PROXY_ENDPOINTS = [
   'prxy', 'baremux', 'epoxy', 'libcurl', 'register-sw.mjs', 'uv'
 ];
 
+// 【修正】/proxy にアクセスした際、自動で /proxy/ にリダイレクトさせて Cannot GET を防ぐ
+app.get('/proxy', (req, res) => res.redirect('/proxy/'));
 app.use('/proxy', express.static(PROXY_DIR));
 
 app.use((req, res, next) => {
@@ -30,7 +31,7 @@ app.use((req, res, next) => {
 });
 
 // ==========================================
-// 2. 画像専用プロキシ (embed.html不要化)
+// 2. 【復旧】画像専用プロキシ (embed.html不要)
 // ==========================================
 const proxyAgent = new https.Agent({ keepAlive: true, maxSockets: 512, timeout: 60000 });
 
@@ -50,6 +51,7 @@ app.get('/_img_/', async (req, res) => {
         res.set('Cache-Control', 'public, max-age=31536000, immutable');
         res.set('Content-Type', imgRes.headers.get('content-type'));
         
+        // 画像バイナリをそのままブラウザに流す
         imgRes.body.pipe(res);
         imgRes.body.on('error', () => res.end());
     } catch (e) {
@@ -58,7 +60,16 @@ app.get('/_img_/', async (req, res) => {
 });
 
 // ==========================================
-// 3. 漫画プロキシ (MangaRaw 本体)
+// 3. 漫画プロキシからの保護（干渉防止壁）
+// ==========================================
+const EXCLUDE_PATHS = [
+    '/proxy', '/prxy', '/baremux', '/epoxy', '/libcurl', 
+    '/register-sw.mjs', '/uv', '/~uv', '/bare', 
+    '/_img_/' // ← 画像プロキシも保護
+];
+
+// ==========================================
+// 4. 漫画プロキシ (MangaRaw 本体)
 // ==========================================
 const TARGET_HOST = "mangarw.com";
 const TARGET_BASE = `https://${TARGET_HOST}`;
@@ -76,7 +87,7 @@ const INJECT_CODE = `
   (function() {
     window.open = () => null;
 
-    // 画像のURLを「server.jsの専用プロキシ」経由に書き換える
+    // 【修正】画像のURLを「/_img_/?url=」経由に書き換える (サーバー側プロキシ)
     const processImages = () => {
       document.querySelectorAll('img').forEach(img => {
         const src = img.dataset.src || img.getAttribute('src');
@@ -129,15 +140,8 @@ const INJECT_CODE = `
 `;
 
 app.all('*', async (req, res, next) => {
-    // ========================================================
-    // 【最重要】Webプロキシ保護ガード
-    // WebプロキシやUltravioletの通信は、漫画プロキシをスキップさせる
-    // ========================================================
-    const EXCLUDE_PATHS = [
-        '/proxy', '/prxy', '/baremux', '/epoxy', '/libcurl', 
-        '/register-sw.mjs', '/uv', '/~uv', '/bare'
-    ];
-    // パスがWebプロキシのもの、またはエンドポイント名ならスキップ
+    // --- 【最重要ガード】 ---
+    // ここでWebプロキシの通信を漫画プロキシに巻き込まれないようにスキップする
     if (EXCLUDE_PATHS.some(p => req.path.startsWith(p)) || PROXY_ENDPOINTS.includes(req.path.replace(/^\//, ''))) {
         return next(); 
     }
@@ -222,11 +226,9 @@ app.all('*', async (req, res, next) => {
         response.body.pipe(res);
 
     } catch (error) {
-        if (!res.headersSent) res.status(502).send("Manga Engine Error: " + error.message);
+        if (!res.headersSent) res.status(502).send("Manga Engine Error");
     }
 });
 
-// ※Ultraviolet を使う場合、Bareサーバーのマウントなどがあればここに記述します
-
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Ultimate Engine Online on port ${PORT}`));
+app.listen(PORT, () => console.log(`Proxy Engine Online on port ${PORT}`));
