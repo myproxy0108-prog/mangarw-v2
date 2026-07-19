@@ -9,16 +9,13 @@ const app = express();
 // 1. Webプロキシ (Ultraviolet等) の処理
 // ==========================================
 const PROXY_DIR = path.join(__dirname, 'proxy'); 
-const PROXY_ENDPOINTS = [
-  'prxy', 'baremux', 'epoxy', 'libcurl', 'register-sw.mjs', 'uv'
-];
+const PROXY_ENDPOINTS = ['prxy', 'baremux', 'epoxy', 'libcurl', 'register-sw.mjs', 'uv'];
 
 app.get('/proxy', (req, res) => res.redirect('/proxy/'));
 app.use('/proxy', express.static(PROXY_DIR));
 
 app.use((req, res, next) => {
     if (res.headersSent) return next();
-    
     const fileName = req.path.replace(/^\//, '');
     if (PROXY_ENDPOINTS.includes(fileName)) {
         const targetPath = path.join(PROXY_DIR, fileName);
@@ -47,7 +44,7 @@ app.use((req, res, next) => {
 });
 
 // ==========================================
-// 3. 【新設】外部CDNを使った超圧縮・画像プロキシ
+// 3. 【核心】極限圧縮・画像プロキシ（Render中継）
 // ==========================================
 const proxyAgent = new https.Agent({ keepAlive: true, maxSockets: 512, timeout: 60000 });
 
@@ -55,8 +52,9 @@ app.get('/_img_/', async (req, res) => {
     const imgUrl = req.query.url;
     if (!imgUrl) return res.status(400).end();
 
-    // 🌟 wsrv.nl を使って横幅720px、WebP、画質40%に超圧縮（通信量を1/10に！）
-    const cdnUrl = `https://wsrv.nl/?url=${encodeURIComponent(imgUrl)}&w=720&output=webp&q=40`;
+    // 🌟 外部無料圧縮サーバー「wsrv.nl」に丸投げする魔法のURL
+    // w=600 (スマホで文字が読めるギリギリの横幅), q=20 (画質20%), output=webp (最軽量フォーマット)
+    const cdnUrl = `https://wsrv.nl/?url=${encodeURIComponent(imgUrl)}&w=600&output=webp&q=20`;
 
     try {
         const imgRes = await fetch(cdnUrl, {
@@ -69,7 +67,7 @@ app.get('/_img_/', async (req, res) => {
 
         // 万が一 wsrv.nl が画像を弾いた場合（リファラ制限など）のフェイルセーフ（保険）
         if (!imgRes.ok) {
-            console.log(`[CDN Miss] Fallback to direct fetch: ${imgUrl}`);
+            console.log(`[Compression Failed] Fallback to direct fetch: ${imgUrl}`);
             const fallbackRes = await fetch(imgUrl, {
                 headers: { 'Referer': 'https://mangarw.com/', 'User-Agent': 'Mozilla/5.0' },
                 agent: proxyAgent
@@ -79,6 +77,8 @@ app.get('/_img_/', async (req, res) => {
         }
 
         res.set('Content-Type', 'image/webp'); 
+        
+        // 極小になった画像データをRender経由でブラウザに流す
         imgRes.body.pipe(res);
         imgRes.body.on('error', () => {
             if (!res.headersSent) res.end();
@@ -107,12 +107,14 @@ const INJECT_CODE = `
   (function() {
     window.open = () => null;
 
-    // 画像のURLを「超圧縮プロキシ」経由に書き換える
+    // 画像のURLを「Renderの画像プロキシ（/_img_/）」に向ける
     const processImages = () => {
       document.querySelectorAll('img').forEach(img => {
         const src = img.dataset.src || img.getAttribute('src');
         if (src && !src.startsWith('data:') && !src.includes('/_img_/?url=')) {
           const absUrl = src.startsWith('http') ? src : window.location.origin + (src.startsWith('/') ? src : '/' + src);
+          
+          // Renderのドメインを指すパスに書き換える
           const proxyUrl = '/_img_/?url=' + encodeURIComponent(absUrl);
           
           img.setAttribute('src', proxyUrl);
@@ -246,4 +248,4 @@ app.all('*', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Super Compressed Manga Engine Online on port ${PORT}`));
+app.listen(PORT, () => console.log(`Extreme Compressed Engine Online on port ${PORT}`));
