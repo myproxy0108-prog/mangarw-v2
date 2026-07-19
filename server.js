@@ -26,9 +26,6 @@ app.use((req, res, next) => {
     next();
 });
 
-// ==========================================
-// 2. 漫画プロキシからの保護（干渉防止壁）
-// ==========================================
 const UV_DYNAMIC_PATHS = [
     '/proxy', '/prxy', '/baremux', '/epoxy', '/libcurl', 
     '/register-sw.mjs', '/uv', '/~uv', '/bare', 
@@ -44,16 +41,16 @@ app.use((req, res, next) => {
 });
 
 // ==========================================
-// 3. 【核心】帯域幅消費ゼロ・画像リダイレクトプロキシ
+// 2. 【核心】負荷ゼロ・リダイレクト画像プロキシ
 // ==========================================
 app.get('/_img_/', (req, res) => {
     const imgUrl = req.query.url;
     if (!imgUrl) return res.status(400).end();
 
     // 🌟 Renderは画像をダウンロードしません！
-    // 代わりに、MDMを確実に突破できる「Googleの公式キャッシュサーバー」のURLを生成し、
-    // ブラウザに「直接Googleからダウンロードしてね」と案内（リダイレクト）を出します。
-    // Renderの通信量は案内分の数バイトだけになり、5GB制限は一生使い切れません。
+    // MDMで絶対に弾かれない「Googleの公式画像プロキシサーバー」のURLを生成し、
+    // ブラウザに「そっちから直接ダウンロードして」と案内（リダイレクト）します。
+    // Renderが送るのはテキスト1行だけなので、通信量もCPU負荷も「ゼロ」です。
     const googleProxyUrl = `https://images1-focus-opensocial.googleusercontent.com/gadgets/proxy?container=focus&refresh=2592000&url=${encodeURIComponent(imgUrl)}`;
 
     res.set('Cache-Control', 'public, max-age=31536000, immutable');
@@ -61,12 +58,12 @@ app.get('/_img_/', (req, res) => {
 });
 
 // ==========================================
-// 4. 漫画プロキシ (MangaRaw 本体処理)
+// 3. 漫画プロキシ (MangaRaw 本体処理)
 // ==========================================
 const TARGET_HOST = "mangarw.com";
 const TARGET_BASE = `https://${TARGET_HOST}`;
-
 const proxyAgent = new https.Agent({ keepAlive: true, maxSockets: 512, timeout: 60000 });
+
 app.use(express.raw({ type: '*/*', limit: '50mb' }));
 
 const INJECT_CODE = `
@@ -80,14 +77,14 @@ const INJECT_CODE = `
   (function() {
     window.open = () => null;
 
-    // 画像のURLを「Renderの案内所（/_img_/）」に向ける
+    // 画像のURLを「Renderの画像案内所（/_img_/）」に向ける
     const processImages = () => {
       document.querySelectorAll('img').forEach(img => {
         const src = img.dataset.src || img.getAttribute('src');
         if (src && !src.startsWith('data:') && !src.includes('/_img_/?url=')) {
           const absUrl = src.startsWith('http') ? src : window.location.origin + (src.startsWith('/') ? src : '/' + src);
           
-          // 見た目のURLはあなたのドメインのまま！
+          // HTML上では完全にあなたのRenderドメインのパスになります
           const proxyUrl = '/_img_/?url=' + encodeURIComponent(absUrl);
           
           img.setAttribute('src', proxyUrl);
@@ -216,9 +213,9 @@ app.all('*', async (req, res) => {
         response.body.pipe(res);
 
     } catch (error) {
-        if (!res.headersSent) res.status(502).send("Server Error: " + error.message);
+        if (!res.headersSent) res.status(502).send("Server Error");
     }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Bandwidth Zero Engine Online on port ${PORT}`));
+app.listen(PORT, () => console.log(`Super Fast Redirect Engine Online on port ${PORT}`));
