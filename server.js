@@ -44,48 +44,20 @@ app.use((req, res, next) => {
 });
 
 // ==========================================
-// 3. 【核心】極限圧縮・画像プロキシ（Render中継）
+// 3. 【核心】帯域幅消費ゼロ・画像リダイレクトプロキシ
 // ==========================================
-const proxyAgent = new https.Agent({ keepAlive: true, maxSockets: 512, timeout: 60000 });
-
-app.get('/_img_/', async (req, res) => {
+app.get('/_img_/', (req, res) => {
     const imgUrl = req.query.url;
     if (!imgUrl) return res.status(400).end();
 
-    // 🌟 外部無料圧縮サーバー「wsrv.nl」に丸投げする魔法のURL
-    // w=600 (スマホで文字が読めるギリギリの横幅), q=20 (画質20%), output=webp (最軽量フォーマット)
-    const cdnUrl = `https://wsrv.nl/?url=${encodeURIComponent(imgUrl)}&w=600&output=webp&q=20`;
+    // 🌟 Renderは画像をダウンロードしません！
+    // 代わりに、MDMを確実に突破できる「Googleの公式キャッシュサーバー」のURLを生成し、
+    // ブラウザに「直接Googleからダウンロードしてね」と案内（リダイレクト）を出します。
+    // Renderの通信量は案内分の数バイトだけになり、5GB制限は一生使い切れません。
+    const googleProxyUrl = `https://images1-focus-opensocial.googleusercontent.com/gadgets/proxy?container=focus&refresh=2592000&url=${encodeURIComponent(imgUrl)}`;
 
-    try {
-        const imgRes = await fetch(cdnUrl, {
-            headers: { 'User-Agent': req.get('user-agent') || 'Mozilla/5.0' },
-            agent: proxyAgent
-        });
-
-        res.set('Access-Control-Allow-Origin', '*');
-        res.set('Cache-Control', 'public, max-age=31536000, immutable');
-
-        // 万が一 wsrv.nl が画像を弾いた場合（リファラ制限など）のフェイルセーフ（保険）
-        if (!imgRes.ok) {
-            console.log(`[Compression Failed] Fallback to direct fetch: ${imgUrl}`);
-            const fallbackRes = await fetch(imgUrl, {
-                headers: { 'Referer': 'https://mangarw.com/', 'User-Agent': 'Mozilla/5.0' },
-                agent: proxyAgent
-            });
-            res.set('Content-Type', fallbackRes.headers.get('content-type'));
-            return fallbackRes.body.pipe(res);
-        }
-
-        res.set('Content-Type', 'image/webp'); 
-        
-        // 極小になった画像データをRender経由でブラウザに流す
-        imgRes.body.pipe(res);
-        imgRes.body.on('error', () => {
-            if (!res.headersSent) res.end();
-        });
-    } catch (e) {
-        if (!res.headersSent) res.status(502).end();
-    }
+    res.set('Cache-Control', 'public, max-age=31536000, immutable');
+    res.redirect(301, googleProxyUrl);
 });
 
 // ==========================================
@@ -94,6 +66,7 @@ app.get('/_img_/', async (req, res) => {
 const TARGET_HOST = "mangarw.com";
 const TARGET_BASE = `https://${TARGET_HOST}`;
 
+const proxyAgent = new https.Agent({ keepAlive: true, maxSockets: 512, timeout: 60000 });
 app.use(express.raw({ type: '*/*', limit: '50mb' }));
 
 const INJECT_CODE = `
@@ -107,14 +80,14 @@ const INJECT_CODE = `
   (function() {
     window.open = () => null;
 
-    // 画像のURLを「Renderの画像プロキシ（/_img_/）」に向ける
+    // 画像のURLを「Renderの案内所（/_img_/）」に向ける
     const processImages = () => {
       document.querySelectorAll('img').forEach(img => {
         const src = img.dataset.src || img.getAttribute('src');
         if (src && !src.startsWith('data:') && !src.includes('/_img_/?url=')) {
           const absUrl = src.startsWith('http') ? src : window.location.origin + (src.startsWith('/') ? src : '/' + src);
           
-          // Renderのドメインを指すパスに書き換える
+          // 見た目のURLはあなたのドメインのまま！
           const proxyUrl = '/_img_/?url=' + encodeURIComponent(absUrl);
           
           img.setAttribute('src', proxyUrl);
@@ -243,9 +216,9 @@ app.all('*', async (req, res) => {
         response.body.pipe(res);
 
     } catch (error) {
-        if (!res.headersSent) res.status(502).send("Server Error");
+        if (!res.headersSent) res.status(502).send("Server Error: " + error.message);
     }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Extreme Compressed Engine Online on port ${PORT}`));
+app.listen(PORT, () => console.log(`Bandwidth Zero Engine Online on port ${PORT}`));
